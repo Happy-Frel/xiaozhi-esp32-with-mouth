@@ -17,6 +17,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "pomodoro_timer.h"
 
 #define TAG "MCP"
 
@@ -61,6 +62,44 @@ void McpServer::AddCommonTools() {
             auto codec = board.GetAudioCodec();
             codec->SetOutputVolume(properties["volume"].value<int>());
             return true;
+        });
+
+    AddTool("self.pomodoro.start",
+        "Start a local pomodoro countdown timer. Use this when the user asks to set a focus timer, pomodoro, countdown, study timer, or work session timer. The timer runs locally on the device.",
+        PropertyList({
+            Property("duration_minutes", kPropertyTypeInteger, 25, 1, 1440),
+            Property("label", kPropertyTypeString, "Pomodoro")
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            int duration_minutes = properties["duration_minutes"].value<int>();
+            auto label = properties["label"].value<std::string>();
+            auto& timer = PomodoroTimer::GetInstance();
+            timer.Start(duration_minutes, label);
+            return timer.GetStatusJson();
+        });
+
+    AddTool("self.pomodoro.cancel",
+        "Cancel the current local pomodoro countdown timer. Use this only when the user asks to cancel or stop the pomodoro timer.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            PomodoroTimer::GetInstance().Cancel();
+            return "{\"running\":false}";
+        });
+
+    AddTool("self.pomodoro.get_status",
+        "Get the current local pomodoro countdown status, including whether it is running and remaining seconds.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            return PomodoroTimer::GetInstance().GetStatusJson();
+        });
+
+    AddTool("self.pomodoro.show",
+        "Show the current local pomodoro countdown on the device screen for 10 seconds.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            bool shown = PomodoroTimer::GetInstance().ShowCountdown();
+            return shown ? PomodoroTimer::GetInstance().GetStatusJson()
+                         : "{\"running\":false}";
         });
     
     auto backlight = board.GetBacklight();

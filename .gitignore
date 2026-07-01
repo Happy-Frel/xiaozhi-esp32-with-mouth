@@ -24,5 +24,9 @@ main/mmap_generate_emoji.h
 .cache
 *.pyc
 *.bin
+*.docx
+~$*.docx
+report_render/
+generate_xiaozhi_report.py
 mmap_generate_*.h
 .clangd

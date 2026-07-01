@@ -36,6 +36,7 @@ public:
     virtual void SetEmotion(const char* emotion);
     virtual void SetChatMessage(const char* role, const char* content);
     virtual void ClearChatMessages();
+    virtual void ShowPomodoroCountdown(int remaining_seconds, int total_seconds, const char* label, int duration_ms = 10000);
     virtual void SetTheme(Theme* theme);
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);

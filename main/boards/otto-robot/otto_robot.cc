@@ -16,6 +16,7 @@
 #include "led/single_led.h"
 #include "mcp_server.h"
 #include "otto_emoji_display.h"
+#include "pomodoro_timer.h"
 #include "power_manager.h"
 #include "system_reset.h"
 #include "websocket_control_server.h"
@@ -214,6 +215,9 @@ private:
                 return;
             }
             app.ToggleChatState();
+        });
+        boot_button_.OnDoubleClick([this]() {
+            PomodoroTimer::GetInstance().ShowCountdown();
         });
     }
 

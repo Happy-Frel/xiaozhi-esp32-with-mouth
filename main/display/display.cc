@@ -1,5 +1,6 @@
 #include <esp_log.h>
 #include <esp_err.h>
+#include <cstdio>
 #include <string>
 #include <cstdlib>
 #include <cstring>
@@ -47,6 +48,14 @@ void Display::SetChatMessage(const char* role, const char* content) {
 
 void Display::ClearChatMessages() {
     // Default empty implementation, override in subclasses if needed
+}
+
+void Display::ShowPomodoroCountdown(int remaining_seconds, int total_seconds, const char* label, int duration_ms) {
+    char buffer[64];
+    int minutes = remaining_seconds / 60;
+    int seconds = remaining_seconds % 60;
+    snprintf(buffer, sizeof(buffer), "%s %02d:%02d", label ? label : "Pomodoro", minutes, seconds);
+    ShowNotification(buffer, duration_ms);
 }
 
 void Display::SetTheme(Theme* theme) {

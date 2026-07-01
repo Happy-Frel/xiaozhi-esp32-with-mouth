@@ -3,6 +3,8 @@
 #include <esp_err.h>
 #include <esp_log.h>
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "assets.h"
@@ -15,6 +17,13 @@
 
 namespace {
 constexpr int kMouthSamplesPerAxis = 3;
+constexpr int kPomodoroTimeScale = 768;
+
+void FormatDuration(int seconds, char* buffer, size_t buffer_size) {
+    int minutes = seconds / 60;
+    int secs = seconds % 60;
+    snprintf(buffer, buffer_size, "%02d:%02d", minutes, secs);
+}
 
 void SetObjectHidden(lv_obj_t* obj, bool hidden) {
     if (obj == nullptr) {
@@ -144,10 +153,32 @@ OttoEmojiDisplay::OttoEmojiDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_p
                     swap_xy) {}
 
 OttoEmojiDisplay::~OttoEmojiDisplay() {
+    if (pomodoro_timer_ != nullptr) {
+        esp_timer_stop(pomodoro_timer_);
+        esp_timer_delete(pomodoro_timer_);
+        pomodoro_timer_ = nullptr;
+    }
+    if (pomodoro_tick_timer_ != nullptr) {
+        esp_timer_stop(pomodoro_tick_timer_);
+        esp_timer_delete(pomodoro_tick_timer_);
+        pomodoro_tick_timer_ = nullptr;
+    }
+
     if (mouth_timer_ != nullptr) {
         esp_timer_stop(mouth_timer_);
         esp_timer_delete(mouth_timer_);
         mouth_timer_ = nullptr;
+    }
+
+    if (pomodoro_layer_ != nullptr) {
+        DisplayLockGuard lock(this);
+        lv_obj_del(pomodoro_layer_);
+        pomodoro_layer_ = nullptr;
+        pomodoro_time_box_ = nullptr;
+        pomodoro_time_shadow_label_ = nullptr;
+        pomodoro_time_label_ = nullptr;
+        pomodoro_label_ = nullptr;
+        pomodoro_bar_ = nullptr;
     }
 
     if (mouth_layer_ != nullptr) {
@@ -184,6 +215,7 @@ void OttoEmojiDisplay::SetupUI() {
         DisplayLockGuard lock(this);
         lv_obj_set_size(preview_image_, width_, height_);
     }
+    SetupPomodoroLayer();
 
     // Mouths are baked into the Otto GIF assets, so no runtime canvas overlay is needed.
     SpiLcdDisplay::SetEmotion("staticstate");
@@ -806,6 +838,136 @@ void OttoEmojiDisplay::SetupPreviewImage() {
     lv_obj_set_size(preview_image_, width_, height_);
 }
 
+void OttoEmojiDisplay::SetupPomodoroLayer() {
+    DisplayLockGuard lock(this);
+    if (container_ == nullptr || pomodoro_layer_ != nullptr) {
+        return;
+    }
+
+    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    auto text_font = lvgl_theme->text_font()->font();
+
+    pomodoro_layer_ = lv_obj_create(container_);
+    lv_obj_remove_style_all(pomodoro_layer_);
+    lv_obj_set_size(pomodoro_layer_, width_, height_);
+    lv_obj_set_style_bg_color(pomodoro_layer_, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(pomodoro_layer_, LV_OPA_COVER, 0);
+    lv_obj_set_flex_flow(pomodoro_layer_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(pomodoro_layer_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(pomodoro_layer_, 14, 0);
+    lv_obj_set_style_pad_gap(pomodoro_layer_, 8, 0);
+
+    pomodoro_label_ = lv_label_create(pomodoro_layer_);
+    lv_obj_set_style_text_color(pomodoro_label_, lv_color_hex(0xF8F1E7), 0);
+    lv_obj_set_style_text_font(pomodoro_label_, text_font, 0);
+    lv_label_set_long_mode(pomodoro_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(pomodoro_label_, width_ - 36);
+    lv_obj_set_style_text_align(pomodoro_label_, LV_TEXT_ALIGN_CENTER, 0);
+
+    pomodoro_time_box_ = lv_obj_create(pomodoro_layer_);
+    lv_obj_remove_style_all(pomodoro_time_box_);
+    lv_obj_set_size(pomodoro_time_box_, width_ - 32, 78);
+    lv_obj_clear_flag(pomodoro_time_box_, LV_OBJ_FLAG_SCROLLABLE);
+
+    pomodoro_time_shadow_label_ = lv_label_create(pomodoro_time_box_);
+    lv_obj_set_style_text_color(pomodoro_time_shadow_label_, lv_color_hex(0x5B1B18), 0);
+    lv_obj_set_style_text_font(pomodoro_time_shadow_label_, text_font, 0);
+    lv_obj_set_style_text_align(pomodoro_time_shadow_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_transform_scale_x(pomodoro_time_shadow_label_, kPomodoroTimeScale, 0);
+    lv_obj_set_style_transform_scale_y(pomodoro_time_shadow_label_, kPomodoroTimeScale, 0);
+
+    pomodoro_time_label_ = lv_label_create(pomodoro_time_box_);
+    lv_obj_set_style_text_color(pomodoro_time_label_, lv_color_hex(0xFF6B4A), 0);
+    lv_obj_set_style_text_font(pomodoro_time_label_, text_font, 0);
+    lv_obj_set_style_text_align(pomodoro_time_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_transform_scale_x(pomodoro_time_label_, kPomodoroTimeScale, 0);
+    lv_obj_set_style_transform_scale_y(pomodoro_time_label_, kPomodoroTimeScale, 0);
+
+    pomodoro_bar_ = lv_bar_create(pomodoro_layer_);
+    lv_obj_set_size(pomodoro_bar_, width_ - 58, 10);
+    lv_bar_set_range(pomodoro_bar_, 0, 100);
+    lv_obj_set_style_bg_color(pomodoro_bar_, lv_color_hex(0x2C3440), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pomodoro_bar_, lv_color_hex(0xFF6B4A), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(pomodoro_bar_, 5, LV_PART_MAIN);
+    lv_obj_set_style_radius(pomodoro_bar_, 5, LV_PART_INDICATOR);
+
+    lv_obj_add_flag(pomodoro_layer_, LV_OBJ_FLAG_HIDDEN);
+
+    esp_timer_create_args_t timer_args = {
+        .callback = [](void* arg) {
+            OttoEmojiDisplay* display = static_cast<OttoEmojiDisplay*>(arg);
+            display->HidePomodoroLayer();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "pomodoro_view_timer",
+        .skip_unhandled_events = true,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &pomodoro_timer_));
+
+    esp_timer_create_args_t tick_timer_args = {
+        .callback = [](void* arg) {
+            OttoEmojiDisplay* display = static_cast<OttoEmojiDisplay*>(arg);
+            int64_t now_us = esp_timer_get_time();
+            int remaining = static_cast<int>((display->pomodoro_target_end_us_ - now_us + 999999) / 1000000);
+            display->pomodoro_remaining_seconds_ = std::max(0, remaining);
+            DisplayLockGuard lock(display);
+            display->UpdatePomodoroLayer();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "pomodoro_tick_timer",
+        .skip_unhandled_events = true,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&tick_timer_args, &pomodoro_tick_timer_));
+}
+
+void OttoEmojiDisplay::HidePomodoroLayer() {
+    DisplayLockGuard lock(this);
+    if (pomodoro_layer_ == nullptr) {
+        return;
+    }
+
+    lv_obj_add_flag(pomodoro_layer_, LV_OBJ_FLAG_HIDDEN);
+    esp_timer_stop(pomodoro_tick_timer_);
+    if (emoji_box_ != nullptr) {
+        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (gif_controller_) {
+        gif_controller_->Start();
+    }
+}
+
+void OttoEmojiDisplay::UpdatePomodoroLayer() {
+    if (pomodoro_layer_ == nullptr || pomodoro_time_label_ == nullptr || pomodoro_label_ == nullptr) {
+        return;
+    }
+
+    char time_text[16];
+    FormatDuration(pomodoro_remaining_seconds_, time_text, sizeof(time_text));
+    lv_label_set_text(pomodoro_time_label_, time_text);
+    if (pomodoro_time_shadow_label_ != nullptr) {
+        lv_label_set_text(pomodoro_time_shadow_label_, time_text);
+    }
+    lv_obj_update_layout(pomodoro_time_label_);
+    lv_obj_set_style_transform_pivot_x(pomodoro_time_label_, lv_obj_get_width(pomodoro_time_label_) / 2, 0);
+    lv_obj_set_style_transform_pivot_y(pomodoro_time_label_, lv_obj_get_height(pomodoro_time_label_) / 2, 0);
+    lv_obj_align(pomodoro_time_label_, LV_ALIGN_CENTER, 0, 0);
+    if (pomodoro_time_shadow_label_ != nullptr) {
+        lv_obj_update_layout(pomodoro_time_shadow_label_);
+        lv_obj_set_style_transform_pivot_x(pomodoro_time_shadow_label_, lv_obj_get_width(pomodoro_time_shadow_label_) / 2, 0);
+        lv_obj_set_style_transform_pivot_y(pomodoro_time_shadow_label_, lv_obj_get_height(pomodoro_time_shadow_label_) / 2, 0);
+        lv_obj_align(pomodoro_time_shadow_label_, LV_ALIGN_CENTER, 4, 4);
+    }
+    lv_label_set_text(pomodoro_label_, pomodoro_title_.empty() ? "Pomodoro" : pomodoro_title_.c_str());
+
+    int progress = 0;
+    if (pomodoro_total_seconds_ > 0) {
+        progress = 100 - (pomodoro_remaining_seconds_ * 100 / pomodoro_total_seconds_);
+    }
+    lv_bar_set_value(pomodoro_bar_, std::clamp(progress, 0, 100), LV_ANIM_OFF);
+}
+
 void OttoEmojiDisplay::InitializeOttoEmojis() {
     ESP_LOGI(TAG, "Otto表情初始化将由Assets系统处理");
     // 表情初始化已移至assets系统,通过DEFAULT_EMOJI_COLLECTION=otto-gif配置
@@ -869,6 +1031,35 @@ void OttoEmojiDisplay::SetEmotion(const char* emotion) {
 
     current_emotion_ = emotion;
     RefreshOttoGifEmotion();
+}
+
+void OttoEmojiDisplay::ShowPomodoroCountdown(int remaining_seconds, int total_seconds, const char* label, int duration_ms) {
+    DisplayLockGuard lock(this);
+    if (pomodoro_layer_ == nullptr) {
+        return;
+    }
+
+    pomodoro_remaining_seconds_ = std::max(0, remaining_seconds);
+    pomodoro_total_seconds_ = std::max(1, total_seconds);
+    pomodoro_target_end_us_ = esp_timer_get_time() + static_cast<int64_t>(pomodoro_remaining_seconds_) * 1000000;
+    pomodoro_title_ = (label == nullptr || strlen(label) == 0) ? "Pomodoro" : label;
+    UpdatePomodoroLayer();
+
+    if (gif_controller_) {
+        gif_controller_->Stop();
+    }
+    if (emoji_box_ != nullptr) {
+        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_remove_flag(pomodoro_layer_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(pomodoro_layer_);
+
+    esp_timer_stop(pomodoro_timer_);
+    esp_timer_stop(pomodoro_tick_timer_);
+    if (pomodoro_remaining_seconds_ > 0) {
+        ESP_ERROR_CHECK(esp_timer_start_periodic(pomodoro_tick_timer_, 1000000));
+    }
+    ESP_ERROR_CHECK(esp_timer_start_once(pomodoro_timer_, duration_ms * 1000));
 }
 
 void OttoEmojiDisplay::RefreshOttoGifEmotion() {
